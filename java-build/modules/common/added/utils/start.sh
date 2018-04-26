@@ -142,6 +142,31 @@ function read_driver_config {
     fi
 }
 
+function resolve_additional_python_deps {
+    # If the root of the repo contains file (worker-)requirements.txt, install them and bundle
+    # them together into big zip file that will be passed to spark-submit.
+
+    # note: the idea of worker-requrements.txt is to isolate those dependencies that
+    # are necessary only for spark workers, because not all the dependencies driver needs
+    # are also needed on the worker nodes
+    r_file=`[ -f "$APP_ROOT/src/worker-requirements.txt" ] && echo worker-requirements.txt || echo requirements.txt`
+    if [ -f "$APP_ROOT/src/$r_file" ]; then
+        if [ ! -f "$APP_ROOT/src/dependencies.zip" ]; then
+            pushd $APP_ROOT/src
+            echo "Building dependencies.zip based on $r_file" >> install.log
+            pip install --upgrade pip >> install.log 2>&1
+            pip install -t dependencies -r $r_file >> install.log 2>&1
+            pushd dependencies
+            zip -r ../dependencies.zip .
+            popd
+            popd
+        fi
+        return 0
+    else
+        return 1
+    fi
+}
+
 function wait_if_cluster_incomplete {
     # See if the cluster already exists. If it does and it's marked "Incomplete",
     # loop waiting for it to be deleted complete or got to "Running"
@@ -237,6 +262,9 @@ check_reverse_proxy
 # Checks if the cluster exists, waits if it's in an incomplete state
 wait_if_cluster_incomplete
 
+# if the resolve_additional_python_deps returns 0 add the file with deps
+PY_FILES=`resolve_additional_python_deps &> /dev/null && echo "--py-files dependencies.zip"`
+
 if [ "$CLI_RES" -ne 0 ]; then
     if [ ${OSHINKO_DEL_CLUSTER:-true} == true ]; then
         echo "Didn't find cluster $OSHINKO_CLUSTER_NAME, creating ephemeral cluster" 
@@ -323,8 +351,8 @@ else
         APP_MAIN_CLASS=$(unzip -p $APP_ROOT/src/$APP_FILE META-INF/MANIFEST.MF | grep -i main-class | cut -d ':' -f 2 | sed 's/\r//')
         CLASS_OPTION="--class $APP_MAIN_CLASS"
     fi
-    echo spark-submit $CLASS_OPTION --master $master $SPARK_OPTIONS $APP_ROOT/src/$APP_FILE $APP_ARGS
-    spark-submit $CLASS_OPTION --master $master $SPARK_OPTIONS $APP_ROOT/src/$APP_FILE $APP_ARGS &
+    echo spark-submit $CLASS_OPTION $PY_FILES --master $master $SPARK_OPTIONS $APP_ROOT/src/$APP_FILE $APP_ARGS
+    spark-submit $CLASS_OPTION $PY_FILES --master $master $SPARK_OPTIONS $APP_ROOT/src/$APP_FILE $APP_ARGS &
     PID=$!
     wait $PID
 
